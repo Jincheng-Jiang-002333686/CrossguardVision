@@ -1,0 +1,151 @@
+{
+  "project": "CrossguardVision",
+  "log_created": "2026-06-19",
+  "source_reference": {
+    "predesign_pptx": "E:/NEU files/TA/CrossguardVision/ppt/CrossguardVision_predesign.pptx",
+    "readme": "E:/NEU files/TA/CrossguardVision/CrossguardVision/README.md"
+  },
+  "goal": "Build a real-time crosswalk safety system that detects pedestrians and crosswalk areas, classifies pedestrian state with spatial reasoning, and triggers a Raspberry Pi warning output.",
+  "pipeline_summary": [
+    {
+      "step": 1,
+      "name": "Data collection",
+      "status": "in_progress",
+      "description": "Collect road and crosswalk videos containing crossing pedestrians, waiting pedestrians, no-risk pedestrians, varied lighting, vehicles, and occlusion."
+    },
+    {
+      "step": 2,
+      "name": "Frame extraction",
+      "status": "done_for_current_dataset",
+      "description": "Videos were sampled into image frames. The predesign recommends one frame every 30 frames, followed by duplicate and blur removal."
+    },
+    {
+      "step": 3,
+      "name": "Annotation",
+      "status": "done_for_current_dataset_with_cleanup_needed",
+      "description": "Current dataset is labeled with person rectangles and crosswalk polygons/quadrilaterals in X-AnyLabeling/LabelMe JSON format."
+    },
+    {
+      "step": 4,
+      "name": "Label validation",
+      "status": "needs_cleanup",
+      "description": "Validation found complete image/JSON pairing but 15 schema or geometry issues."
+    },
+    {
+      "step": 5,
+      "name": "YOLO-Seg dataset conversion",
+      "status": "done",
+      "description": "convert_xanylabeling_to_yoloseg.py converts JSON -> YOLO-Seg at dataset/yolo_seg/ (269 imgs, 3896 person + 945 crosswalk, coords clamped). val currently = train (no split yet)."
+    },
+    {
+      "step": 6,
+      "name": "YOLO-Seg training and testing",
+      "status": "runs_smoke_only_val_equals_train",
+      "description": "train_yoloseg.py runs end-to-end. yolo11m-seg, 120 epochs, imgsz 896 -> runs/seg/m_seg_e120/weights/best.pt. Metrics are optimistic (val=train): crosswalk mask mAP50 0.986, person mask mAP50 0.869. Needs a real train/val/test split for honest evaluation."
+    },
+    {
+      "step": 7,
+      "name": "Spatial reasoning",
+      "status": "implemented_and_audited",
+      "description": "spatial_reasoning.py classifies crossing/waiting/no_risk via perspective-aware geometry: foot-to-crosswalk distance normalized by box height, a min-size gate, and an inner-edge intersection crossing zone. Multi-agent visual audit: 6 good / 2 acceptable / 0 bad, 0 missed crossings. Optional cleanup: small hull erosion + crossing_k fallback review."
+    },
+    {
+      "step": 8,
+      "name": "Raspberry Pi deployment",
+      "status": "designed_not_implemented",
+      "description": "Run camera capture, model inference, state classification, and warning-light control in real time."
+    }
+  ],
+  "current_dataset": {
+    "path": "E:/NEU files/TA/CrossguardVision/CrossguardVision/dataset/Crossguard_data",
+    "format": "X-AnyLabeling / LabelMe JSON paired with JPG images",
+    "image_files": 269,
+    "json_files": 269,
+    "csv_files": 1,
+    "rename_mapping": "E:/NEU files/TA/CrossguardVision/CrossguardVision/dataset/Crossguard_data/rename_mapping.csv",
+    "file_pattern": "crossguard_####.jpg and crossguard_####.json",
+    "label_counts": {
+      "person": 3896,
+      "crosswalk": 945
+    },
+    "shape_type_counts": {
+      "rectangle": 3897,
+      "polygon": 592,
+      "quadrilateral": 352
+    },
+    "image_json_pairing": {
+      "images_without_json": 0,
+      "json_without_image": 0
+    }
+  },
+  "tools_and_scripts": {
+    "auto_label_person.py": {
+      "path": "E:/NEU files/TA/CrossguardVision/auto_label_person.py",
+      "purpose": "Pre-label person rectangles using a pretrained YOLO model and write X-AnyLabeling/LabelMe-compatible JSON files.",
+      "default_behavior": "Skips images with existing JSON files unless --overwrite is used."
+    },
+    "validate_labels.py": {
+      "path": "E:/NEU files/TA/CrossguardVision/validate_labels.py",
+      "purpose": "Validate JSON schema, image pairing, image dimensions, allowed labels, shape points, and out-of-bounds coordinates."
+    },
+    "yolo11m.pt": {
+      "path": "E:/NEU files/TA/CrossguardVision/models/yolo11m.pt",
+      "purpose": "Pretrained YOLO model used for person pre-labeling."
+    },
+    "X-AnyLabeling": {
+      "path": "E:/NEU files/TA/CrossguardVision/X-AnyLabeling",
+      "purpose": "Annotation tool used to review person boxes and draw crosswalk polygons."
+    }
+  },
+  "latest_validation": {
+    "date": "2026-06-19",
+    "command": "python validate_labels.py \"E:/NEU files/TA/CrossguardVision/CrossguardVision/dataset/Crossguard_data\"",
+    "json_files": 269,
+    "person_boxes": 3896,
+    "crosswalk_labels": 945,
+    "files_with_crosswalk_polygons": 168,
+    "images_without_json": 0,
+    "json_without_image": 0,
+    "total_errors": 15,
+    "errors": [
+      "crossguard_0012.json: missing top keys {'description'}",
+      "crossguard_0013.json: missing top keys {'description'}",
+      "crossguard_0014.json: missing top keys {'description'}",
+      "crossguard_0015.json: missing top keys {'description'}",
+      "crossguard_0050.json shape13: point (-0.7,575.6) out of bounds 1920x1080",
+      "crossguard_0050.json shape13: point (-0.7,688.1) out of bounds 1920x1080",
+      "crossguard_0175.json shape17: point (-7.1,2008.7) out of bounds 3840x2160",
+      "crossguard_0177.json shape15: point (-10.1,2047.2) out of bounds 3840x2160",
+      "crossguard_0180.json shape13: point (-12.7,1928.2) out of bounds 3840x2160",
+      "crossguard_0223.json shape17: point (-4.1,1921.6) out of bounds 3840x2160",
+      "crossguard_0226.json shape17: point (-3.8,1962.8) out of bounds 3840x2160",
+      "crossguard_0227.json shape17: point (-8.3,1956.3) out of bounds 3840x2160",
+      "crossguard_0230.json shape14: point (-19.1,1935.1) out of bounds 3840x2160",
+      "crossguard_0236.json shape15: point (-2.6,1842.8) out of bounds 3840x2160",
+      "crossguard_0246.json shape19: point (-1.3,1850.3) out of bounds 3840x2160"
+    ]
+  },
+  "completed_so_far": [
+    "Created the project predesign pipeline in CrossguardVision_predesign.pptx.",
+    "Collected crosswalk video/image source material.",
+    "Extracted representative image frames from source videos.",
+    "Used pretrained YOLO-based tooling to pre-label person boxes.",
+    "Manually labeled or corrected person and crosswalk annotations in X-AnyLabeling.",
+    "Consolidated the current labeled dataset into Crossguard_data.",
+    "Normalized dataset names to the crossguard_#### pattern and kept rename_mapping.csv.",
+    "Created this README and JSON project progress log."
+  ],
+  "next_actions": [
+    "DEFERRED until dataset fully collected: enhance dataset diversity (currently only 2 source clips) and increase crosswalk-area prediction accuracy.",
+    "Collect/label new intersection scenes; consider a model-assisted crosswalk pre-labeler using best.pt (mirrors auto_label_person.py).",
+    "Create a real train/validation/test split (hold IMG_0232 as test) and retrain for the first HONEST crosswalk mAP (val currently = train).",
+    "Optional spatial-reasoning polish: small --hull-erode-frac curb cleanup; review the crossing_k distance fallback (one non-zone false crossing).",
+    "Later: integrate Raspberry Pi GPIO warning-light control.",
+    "See logs/worklog_2026-06-19.md for the full session record."
+  ],
+  "notes": [
+    "The YOLO classes should remain person and crosswalk.",
+    "The states crossing, waiting, and no_risk should be produced by spatial reasoning after model inference.",
+    "The crosswalk area should be trained as segmentation/mask data because a rectangular crosswalk box is not accurate enough for the downstream safety logic."
+  ]
+}
