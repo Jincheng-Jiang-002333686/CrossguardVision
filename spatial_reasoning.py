@@ -35,9 +35,15 @@ so it can be unit-tested without a model. `run_image()` wraps a YOLO-Seg model.
 
 CLI:
     python spatial_reasoning.py --selftest
+    # single image:
     python spatial_reasoning.py \
         --weights ".../runs/seg/m_seg_e120/weights/best.pt" \
         --image   ".../dataset/IMG_0232/corss2_0150.jpg"
+    # whole folder (batch) -> <stem>_state.jpg per image + 2 CSVs:
+    python spatial_reasoning.py \
+        --weights ".../runs/seg/26s_seg/weights/best.pt" \
+        --images-dir ".../dataset/Crossguard_data_test" \
+        --out ".../runs/spatial/26s_test"
 """
 
 import argparse
@@ -47,6 +53,7 @@ import cv2
 import numpy as np
 
 # ---- states & colors (BGR) -------------------------------------------------
+IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
 CROSSING, WAITING, NO_RISK = "crossing", "waiting", "no_risk"
 STATE_COLOR = {CROSSING: (0, 0, 255), WAITING: (0, 165, 255), NO_RISK: (0, 200, 0)}
 ZONE_COLOR = (0, 255, 255)  # yellow hull outline
@@ -233,31 +240,49 @@ def annotate(image, crosswalk_mask, people, hull=None):
     return out
 
 
-def run_image(weights, image_path, out_dir, conf=0.25, imgsz=640,
-              crossing_k=0.10, waiting_k=0.50, min_h_frac=0.05, use_hull=True,
-              min_arms=2, hull_erode_frac=0.0, device="0"):
-    from ultralytics import YOLO
-
+def predict_states(model, image_path, conf=0.25, imgsz=640,
+                   crossing_k=0.10, waiting_k=0.50, min_h_frac=0.05, use_hull=True,
+                   min_arms=2, hull_erode_frac=0.0, device="0"):
+    """Run an already-loaded model on one image + classify.
+    Returns (img, crosswalk_mask, people, zone_outline)."""
     img = cv2.imread(image_path)
     if img is None:
         raise FileNotFoundError(image_path)
     H, W = img.shape[:2]
-
-    model = YOLO(weights)
     result = model.predict(image_path, conf=conf, imgsz=imgsz, device=device, verbose=False)[0]
-
     cw_mask = crosswalk_mask_from_result(result, (H, W))
     boxes = person_boxes_from_result(result)
     zone, outline = (crossing_zone_from_mask(cw_mask, min_arms=min_arms, erode_frac=hull_erode_frac)
                      if use_hull else (None, None))
     people = classify_people(boxes, cw_mask, crossing_k, waiting_k, min_h_frac,
                              use_hull=use_hull, crossing_zone=zone)
+    return img, cw_mask, people, outline
 
+
+def _save_annotated(img, cw_mask, people, outline, image_path, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, os.path.splitext(os.path.basename(image_path))[0] + "_state.jpg")
     cv2.imwrite(out_path, annotate(img, cw_mask, people, hull=outline))
+    return out_path
 
-    counts = {s: sum(p["state"] == s for p in people) for s in (CROSSING, WAITING, NO_RISK)}
+
+def _counts(people):
+    return {s: sum(p["state"] == s for p in people) for s in (CROSSING, WAITING, NO_RISK)}
+
+
+def run_image(weights, image_path, out_dir, conf=0.25, imgsz=640,
+              crossing_k=0.10, waiting_k=0.50, min_h_frac=0.05, use_hull=True,
+              min_arms=2, hull_erode_frac=0.0, device="0", model=None):
+    """Single image: load model (unless one is passed), classify, save, print."""
+    if model is None:
+        from ultralytics import YOLO
+        model = YOLO(weights)
+    img, cw_mask, people, outline = predict_states(
+        model, image_path, conf, imgsz, crossing_k, waiting_k, min_h_frac,
+        use_hull, min_arms, hull_erode_frac, device)
+    out_path = _save_annotated(img, cw_mask, people, outline, image_path, out_dir)
+    H, W = img.shape[:2]
+    counts = _counts(people)
     print(f"\nimage      : {image_path}  ({W}x{H})")
     print(f"crosswalk  : {'detected' if cw_mask.any() else 'NONE detected'}  hull={'on' if use_hull else 'off'}")
     print(f"persons    : {len(people)}  -> {counts}")
@@ -266,6 +291,72 @@ def run_image(weights, image_path, out_dir, conf=0.25, imgsz=640,
               f"dist={p['dist_px']} boxH={p['box_h']} foot={p['foot_point']}")
     print(f"annotated  : {out_path}")
     return people
+
+
+def run_folder(weights, images_dir, out_dir, conf=0.25, imgsz=640,
+               crossing_k=0.10, waiting_k=0.50, min_h_frac=0.05, use_hull=True,
+               min_arms=2, hull_erode_frac=0.0, device="0"):
+    """Batch: load the model ONCE and classify every image in images_dir.
+    Writes <stem>_state.jpg per image + two CSVs (per-image counts and
+    per-person predictions)."""
+    import csv
+    from ultralytics import YOLO
+
+    imgs = sorted(f for f in os.listdir(images_dir)
+                  if os.path.splitext(f)[1].lower() in IMG_EXTS)
+    if not imgs:
+        raise SystemExit(f"no images found in {images_dir}")
+    os.makedirs(out_dir, exist_ok=True)
+    model = YOLO(weights)
+    print(f"loaded weights : {weights}")
+    print(f"processing     : {len(imgs)} images  {images_dir} -> {out_dir}")
+
+    per_image, per_person = [], []
+    agg = {CROSSING: 0, WAITING: 0, NO_RISK: 0}
+    no_cw = 0
+    for k, name in enumerate(imgs, 1):
+        path = os.path.join(images_dir, name)
+        try:
+            img, cw_mask, people, outline = predict_states(
+                model, path, conf, imgsz, crossing_k, waiting_k, min_h_frac,
+                use_hull, min_arms, hull_erode_frac, device)
+        except Exception as e:
+            print(f"  [WARN] {name}: {e}")
+            continue
+        _save_annotated(img, cw_mask, people, outline, path, out_dir)
+        c = _counts(people)
+        for s in agg:
+            agg[s] += c[s]
+        has_cw = bool(cw_mask.any())
+        no_cw += 0 if has_cw else 1
+        per_image.append([name, len(people), c[CROSSING], c[WAITING], c[NO_RISK], int(has_cw)])
+        for i, p in enumerate(people):
+            per_person.append([name, i, p["state"], p["ratio"], p["dist_px"], p["box_h"],
+                               int(p["in_zone"]), p["foot_point"][0], p["foot_point"][1]])
+        if k % 10 == 0 or k == len(imgs):
+            print(f"  [{k}/{len(imgs)}] {name}: {len(people)} persons {c}")
+
+    sum_path = os.path.join(out_dir, "spatial_summary.csv")
+    with open(sum_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["image", "persons", "crossing", "waiting", "no_risk", "crosswalk_detected"])
+        w.writerows(per_image)
+    det_path = os.path.join(out_dir, "spatial_predictions.csv")
+    with open(det_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["image", "person", "state", "ratio", "dist_px", "box_h", "in_zone", "foot_x", "foot_y"])
+        w.writerows(per_person)
+
+    total_people = sum(r[1] for r in per_image)
+    print("\n========== BATCH SPATIAL SUMMARY ==========")
+    print(f"  images processed : {len(per_image)}")
+    print(f"  no crosswalk det : {no_cw}")
+    print(f"  persons total    : {total_people}  -> {agg}")
+    print(f"  annotated images : {out_dir} (<stem>_state.jpg)")
+    print(f"  per-image  csv   : {sum_path}")
+    print(f"  per-person csv   : {det_path}")
+    print("===========================================")
+    return per_image
 
 
 # ---- synthetic self-test (proves the branches without a model) -------------
@@ -309,7 +400,8 @@ def selftest():
 def main():
     ap = argparse.ArgumentParser(description="CrossguardVision spatial reasoning (state classification)")
     ap.add_argument("--weights", help="YOLO-Seg weights (best.pt)")
-    ap.add_argument("--image", help="Image to classify")
+    ap.add_argument("--image", help="Single image to classify")
+    ap.add_argument("--images-dir", help="Folder of images -> classify every one (batch) + write CSVs")
     ap.add_argument("--out", default=None, help="Output dir (default <repo>/CrossguardVision/runs/spatial)")
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--imgsz", type=int, default=640)
@@ -332,15 +424,19 @@ def main():
     if args.selftest:
         raise SystemExit(0 if selftest() else 1)
 
-    if not (args.weights and args.image):
-        ap.error("provide --weights and --image, or use --selftest")
+    if not (args.weights and (args.image or args.images_dir)):
+        ap.error("provide --weights and (--image OR --images-dir), or use --selftest")
 
     repo = os.path.dirname(os.path.abspath(__file__))
     out_dir = args.out or os.path.join(repo, "CrossguardVision", "runs", "spatial")
-    run_image(args.weights, args.image, out_dir, conf=args.conf, imgsz=args.imgsz,
-              crossing_k=args.crossing_k, waiting_k=args.waiting_k, min_h_frac=args.min_h_frac,
-              use_hull=not args.no_hull, min_arms=args.min_arms,
-              hull_erode_frac=args.hull_erode_frac, device=args.device)
+    common = dict(conf=args.conf, imgsz=args.imgsz, crossing_k=args.crossing_k,
+                  waiting_k=args.waiting_k, min_h_frac=args.min_h_frac,
+                  use_hull=not args.no_hull, min_arms=args.min_arms,
+                  hull_erode_frac=args.hull_erode_frac, device=args.device)
+    if args.images_dir:
+        run_folder(args.weights, args.images_dir, out_dir, **common)
+    else:
+        run_image(args.weights, args.image, out_dir, **common)
 
 
 if __name__ == "__main__":

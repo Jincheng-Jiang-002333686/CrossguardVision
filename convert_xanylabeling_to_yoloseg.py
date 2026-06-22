@@ -21,23 +21,39 @@ Output layout (standard Ultralytics layout; labels dir mirrors images dir):
     <out>/
       images/train/crossguard_0001.jpg ...
       labels/train/crossguard_0001.txt ...
-      images/val/...        (only if --val-split > 0)
+      images/val/...        (if a val split exists)
       labels/val/...
       crossguard_seg.yaml
 
 Images are HARD-LINKED by default (instant, no extra disk when out dir is on
 the same drive as the source); falls back to copy across drives.
 
-Usage (from the `myenv` conda env):
+TWO WAYS TO USE IT
+------------------
+1) EXPLICIT-SPLIT mode (use this when you already split the data into
+   train/test folders — it maps each folder to a fixed split and does NOT
+   reshuffle, so a pre-made split is preserved exactly):
+
     python convert_xanylabeling_to_yoloseg.py \
-        "E:/NEU files/TA/CrossguardVision/CrossguardVision/dataset/Crossguard_data" \
-        --out "E:/NEU files/TA/CrossguardVision/CrossguardVision/dataset/yolo_seg"
+        --train "E:/.../CrossguardVision/dataset/Crossguard_data_train" \
+        --val   "E:/.../CrossguardVision/dataset/Crossguard_data_test" \
+        --out   "E:/.../CrossguardVision/dataset/yolo_seg"
+
+   (Ultralytics evaluates on the `val` split, so point --val at the held-out
+   test set when there is no separate validation set.)
+
+2) LEGACY pooled mode (one or more folders pooled, then a random val split):
+
+    python convert_xanylabeling_to_yoloseg.py \
+        "E:/.../dataset/Crossguard_data" \
+        --out "E:/.../dataset/yolo_seg" --val-split 0.2
 
 Options:
-    --val-split 0.0     fraction held out for val (0 -> all train, val=train)
+    --train / --val / --test  folders -> that split (explicit-split mode)
+    --val-split 0.0     (legacy) fraction held out for val (0 -> val=train)
     --link hardlink|copy|symlink   how images are placed (default hardlink)
     --classes person,crosswalk     class order -> ids 0,1,...
-    --seed 0            shuffle seed for the val split
+    --seed 0            shuffle seed for the legacy val split
 """
 
 import argparse
@@ -108,25 +124,10 @@ def place_image(src, dst, mode):
     shutil.copy2(src, dst)
 
 
-def main():
-    ap = argparse.ArgumentParser(description="X-AnyLabeling JSON -> YOLO-Seg dataset")
-    ap.add_argument("folders", nargs="+", help="Folders containing image + .json pairs")
-    ap.add_argument("--out", required=True, help="Output dataset directory")
-    ap.add_argument("--classes", default="person,crosswalk",
-                    help="Comma-separated class names; index = class id (default person,crosswalk)")
-    ap.add_argument("--val-split", type=float, default=0.0,
-                    help="Fraction of images held out for val (default 0 -> all train, val=train)")
-    ap.add_argument("--link", choices=["hardlink", "copy", "symlink"], default="hardlink",
-                    help="How to place images into the dataset (default hardlink)")
-    ap.add_argument("--seed", type=int, default=0, help="Shuffle seed for val split")
-    args = ap.parse_args()
-
-    classes = [c.strip() for c in args.classes.split(",") if c.strip()]
-    cls_id = {name: i for i, name in enumerate(classes)}
-
-    # 1. Collect every (image, json) pair across all input folders.
-    pairs = []  # (stem, image_path, json_path)
-    for folder in args.folders:
+def collect_pairs(folders):
+    """Return list of (stem, image_path, json_path) for every JSON with an image."""
+    out = []
+    for folder in folders:
         if not os.path.isdir(folder):
             print(f"[WARN] not a folder, skipping: {folder}")
             continue
@@ -138,34 +139,78 @@ def main():
             if img is None:
                 print(f"[WARN] json without image, skipping: {name}")
                 continue
-            pairs.append((stem, img, os.path.join(folder, name)))
+            out.append((stem, img, os.path.join(folder, name)))
+    return out
 
-    if not pairs:
-        print("[ERROR] no image/json pairs found.")
-        sys.exit(1)
 
-    # 2. Decide train/val membership.
-    rng = random.Random(args.seed)
-    idx = list(range(len(pairs)))
-    rng.shuffle(idx)
-    n_val = int(round(len(pairs) * args.val_split))
-    val_set = set(idx[:n_val])
-    has_val = n_val > 0
+def main():
+    ap = argparse.ArgumentParser(description="X-AnyLabeling JSON -> YOLO-Seg dataset")
+    ap.add_argument("folders", nargs="*",
+                    help="(legacy) folders of image+json pairs; pooled then split by --val-split")
+    ap.add_argument("--out", required=True, help="Output dataset directory")
+    ap.add_argument("--classes", default="person,crosswalk",
+                    help="Comma-separated class names; index = class id (default person,crosswalk)")
+    ap.add_argument("--train", nargs="*", default=[],
+                    help="Folder(s) -> train split (explicit-split mode, no reshuffle)")
+    ap.add_argument("--val", nargs="*", default=[],
+                    help="Folder(s) -> val split (explicit-split mode). Ultralytics evaluates on this.")
+    ap.add_argument("--test", nargs="*", default=[],
+                    help="Folder(s) -> test split (optional, explicit-split mode)")
+    ap.add_argument("--val-split", type=float, default=0.0,
+                    help="(legacy pooled mode) fraction held out for val (0 -> all train, val=train)")
+    ap.add_argument("--link", choices=["hardlink", "copy", "symlink"], default="hardlink",
+                    help="How to place images into the dataset (default hardlink)")
+    ap.add_argument("--seed", type=int, default=0, help="Shuffle seed for the legacy val split")
+    ap.add_argument("--clean", action="store_true",
+                    help="Delete existing images/ and labels/ under --out first "
+                         "(prevents mixing with a previous, differently-named dataset)")
+    args = ap.parse_args()
 
-    # 3. Prepare output dirs.
-    splits = ["train", "val"] if has_val else ["train"]
-    for sp in splits:
+    classes = [c.strip() for c in args.classes.split(",") if c.strip()]
+    cls_id = {name: i for i, name in enumerate(classes)}
+
+    # 1. Build a tagged list of (stem, image, json, split).
+    explicit = bool(args.train or args.val or args.test)
+    tagged = []
+    if explicit:
+        for sp, folders in (("train", args.train), ("val", args.val), ("test", args.test)):
+            for stem, img, jp in collect_pairs(folders):
+                tagged.append((stem, img, jp, sp))
+        if not tagged:
+            print("[ERROR] no image/json pairs found in --train/--val/--test folders.")
+            sys.exit(1)
+    else:
+        pairs = collect_pairs(args.folders)
+        if not pairs:
+            print("[ERROR] no image/json pairs found (pass folders, or use --train/--val).")
+            sys.exit(1)
+        rng = random.Random(args.seed)
+        idx = list(range(len(pairs)))
+        rng.shuffle(idx)
+        n_val = int(round(len(pairs) * args.val_split))
+        val_set = set(idx[:n_val])
+        for i, (stem, img, jp) in enumerate(pairs):
+            tagged.append((stem, img, jp, "val" if i in val_set else "train"))
+
+    # 2. Prepare output dirs for the splits that actually have data.
+    if args.clean:
+        for sub in ("images", "labels"):
+            d = os.path.join(args.out, sub)
+            if os.path.isdir(d):
+                shutil.rmtree(d)
+                print(f"[clean] removed {d}")
+    splits_present = [s for s in ("train", "val", "test") if any(t[3] == s for t in tagged)]
+    for sp in splits_present:
         os.makedirs(os.path.join(args.out, "images", sp), exist_ok=True)
         os.makedirs(os.path.join(args.out, "labels", sp), exist_ok=True)
 
-    stats = {"train": 0, "val": 0}
+    stats = {s: 0 for s in ("train", "val", "test")}
     inst = {c: 0 for c in classes}
     skipped_shapes = 0
     unknown_labels = {}
 
-    # 4. Convert each pair.
-    for i, (stem, img_path, json_path) in enumerate(pairs):
-        split = "val" if i in val_set else "train"
+    # 3. Convert each pair into its assigned split.
+    for stem, img_path, json_path, split in tagged:
         try:
             d = json.load(open(json_path, encoding="utf-8"))
         except Exception as e:
@@ -203,24 +248,31 @@ def main():
                 f.write("\n")
         stats[split] += 1
 
-    # 5. Write dataset YAML.
+    # 4. Write dataset YAML.
     out_abs = os.path.abspath(args.out).replace("\\", "/")
     yaml_path = os.path.join(args.out, "crossguard_seg.yaml")
+    has_val = stats["val"] > 0
+    has_test = stats["test"] > 0
     val_dir = "images/val" if has_val else "images/train"
     with open(yaml_path, "w", encoding="utf-8") as f:
         f.write("# Auto-generated by convert_xanylabeling_to_yoloseg.py\n")
         f.write(f"path: {out_abs}\n")
         f.write("train: images/train\n")
         f.write(f"val: {val_dir}\n")
+        if has_test:
+            f.write("test: images/test\n")
         f.write("names:\n")
         for i, name in enumerate(classes):
             f.write(f"  {i}: {name}\n")
 
-    # 6. Report.
+    # 5. Report.
     print("\n========== CONVERSION SUMMARY ==========")
-    print(f"  pairs found        : {len(pairs)}")
+    print(f"  mode               : {'explicit-split' if explicit else 'legacy pooled'}")
+    print(f"  pairs found        : {len(tagged)}")
     print(f"  train images       : {stats['train']}")
     print(f"  val images         : {stats['val']}" + ("" if has_val else "  (val -> train)"))
+    if has_test:
+        print(f"  test images        : {stats['test']}")
     for c in classes:
         print(f"  instances [{c}]    : {inst[c]}")
     print(f"  skipped shapes     : {skipped_shapes}")
