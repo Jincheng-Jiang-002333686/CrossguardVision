@@ -1,0 +1,12 @@
+cd "E:/NEU files/TA/CrossguardVision"
+conda activate myenv
+
+
+python convert_xanylabeling_to_yoloseg.py --train "E:/NEU files/TA/CrossguardVision/CrossguardVision/dataset/Crossguard_data_train" --val "E:/NEU files/TA/CrossguardVision/CrossguardVision/dataset/Crossguard_data_test" --out "E:/NEU files/TA/CrossguardVision/CrossguardVision/dataset/yolo_seg" --clean
+
+
+python train_yoloseg.py --data "E:/NEU files/TA/CrossguardVision/CrossguardVision/dataset/yolo_seg/crossguard_seg.yaml" --model yolo11n-seg.pt --epochs 1 --imgsz 896 --batch 4 --patience 30 --name 11n_seg
+
+
+python spatial_reasoning.py --weights "E:/NEU files/TA/CrossguardVision/CrossguardVision/runs/seg/26s_seg/weights/best.pt" --images-dir "E:/NEU files/TA/CrossguardVision/CrossguardVision/dataset/Crossguard_data_test" --out "E:/NEU files/TA/CrossguardVision/CrossguardVision/runs/spatial/26s_test" --imgsz 896
+
