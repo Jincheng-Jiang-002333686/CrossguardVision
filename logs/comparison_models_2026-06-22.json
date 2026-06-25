@@ -1,0 +1,26 @@
+{
+  "project": "CrossguardVision",
+  "log_created": "2026-06-22",
+  "experiment": "model comparison (instance segmentation)",
+  "framework": "Ultralytics",
+  "task": "segment",
+  "classes": { "0": "person", "1": "crosswalk" },
+  "design": "2 versions (YOLO11, YOLO26) x scales: YOLO11 {n,s,m}, YOLO26 {n,s}",
+  "imgsz_reference": 640,
+  "spec_source": "Ultralytics official COCO instance-segmentation tables; params/FLOPs/mask-mAP re-verified 2026-06-22",
+  "note_pretrained": "All figures are COCO-pretrained reference specs, not final results. Final numbers come from fine-tuning all 5 on CrossguardVision after a real train/val/test split (today val==train).",
+  "note_speed": "Published speeds are T4 GPU (TensorRT), NOT Raspberry Pi. Pi/CPU latency must be measured: batch=1, fixed imgsz, ~20 warmup + >=200 timed runs, report median + p95, split pre/infer/post, state precision.",
+  "models": [
+    { "name": "yolo11n-seg", "weights": "yolo11n-seg.pt", "version": "YOLO11", "scale": "n", "params_M": 2.9, "flops_B": 10.4, "mask_mAP50_95": 32.0, "box_mAP50_95": 38.9 },
+    { "name": "yolo11s-seg", "weights": "yolo11s-seg.pt", "version": "YOLO11", "scale": "s", "params_M": 10.1, "flops_B": 35.5, "mask_mAP50_95": 37.8, "box_mAP50_95": 46.6 },
+    { "name": "yolo11m-seg", "weights": "yolo11m-seg.pt", "version": "YOLO11", "scale": "m", "params_M": 22.4, "flops_B": 123.3, "mask_mAP50_95": 41.5, "box_mAP50_95": 51.5 },
+    { "name": "yolo26n-seg", "weights": "yolo26n-seg.pt", "version": "YOLO26", "scale": "n", "params_M": 2.7, "flops_B": 9.1, "mask_mAP50_95": 33.9, "box_mAP50_95": 39.6 },
+    { "name": "yolo26s-seg", "weights": "yolo26s-seg.pt", "version": "YOLO26", "scale": "s", "params_M": 10.4, "flops_B": 34.2, "mask_mAP50_95": 40.0, "box_mAP50_95": 47.3 }
+  ],
+  "metrics_to_report": [
+    "Box: precision, recall, mAP50, mAP50-95",
+    "Mask: precision, recall, mAP50, mAP50-95",
+    "Inference latency (ms) and FPS, measured on Raspberry Pi (batch=1)"
+  ],
+  "metric_parity_note": "All 5 are Ultralytics models scored identically -> directly comparable, no COCO/pycocotools conversion needed."
+}

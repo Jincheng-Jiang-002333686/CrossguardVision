@@ -3,10 +3,12 @@
 spatial_reasoning.py
 --------------------
 Stage 8 of CrossguardVision: after YOLO-Seg inference, classify each detected
-pedestrian as `crossing`, `waiting`, or `no_risk` using geometry only.
+pedestrian's risk as `high_risk`, `medium_risk`, or `low_risk` using geometry only.
 
-Design rule: crossing / waiting / no_risk are NOT model classes. They are
+Design rule: high_risk / medium_risk / low_risk are NOT model classes. They are
 produced here from the person boxes and the crosswalk segmentation mask.
+The geometric state maps to risk: in crossing-zone -> high_risk, waiting near the
+crosswalk -> medium_risk, far away / too small -> low_risk.
 
 Perspective note
 ----------------
@@ -25,10 +27,10 @@ this encloses the arms plus the road area between them. A foot inside that hull
 counts as crossing even if it is on bare asphalt.
 
 Logic (per person; feet = bottom-centre of box; bh = box height; hull = crossing zone):
-  * too small (bh < min_h_frac * imageHeight)              -> no_risk (too far to assess)
-  * foot inside hull  OR  dist_to_crosswalk <= crossing_k*bh -> crossing
-  * dist_to_crosswalk <= waiting_k * bh                     -> waiting
-  * otherwise                                              -> no_risk
+  * too small (bh < min_h_frac * imageHeight)              -> low_risk (too far to assess)
+  * foot inside hull  OR  dist_to_crosswalk <= crossing_k*bh -> high_risk (in crossing zone)
+  * dist_to_crosswalk <= waiting_k * bh                     -> medium_risk (waiting near)
+  * otherwise                                              -> low_risk
 
 The core classifier `classify_people()` is pure geometry (boxes + binary mask)
 so it can be unit-tested without a model. `run_image()` wraps a YOLO-Seg model.
@@ -54,8 +56,12 @@ import numpy as np
 
 # ---- states & colors (BGR) -------------------------------------------------
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
-CROSSING, WAITING, NO_RISK = "crossing", "waiting", "no_risk"
-STATE_COLOR = {CROSSING: (0, 0, 255), WAITING: (0, 165, 255), NO_RISK: (0, 200, 0)}
+# Risk labels (the OUTPUT classes). Geometric state -> risk:
+#   in crossing-zone / on crosswalk -> HIGH_RISK
+#   waiting near the crosswalk       -> MEDIUM_RISK
+#   far away / too small to assess   -> LOW_RISK
+HIGH_RISK, MEDIUM_RISK, LOW_RISK = "high_risk", "medium_risk", "low_risk"
+STATE_COLOR = {HIGH_RISK: (0, 0, 255), MEDIUM_RISK: (0, 165, 255), LOW_RISK: (0, 200, 0)}
 ZONE_COLOR = (0, 255, 255)  # yellow hull outline
 
 
@@ -148,7 +154,7 @@ def classify_people(boxes, crosswalk_mask, crossing_k=0.10, waiting_k=0.50,
     crosswalk_mask : HxW uint8 {0,1} union of crosswalk masks.
     crossing_k     : crossing if foot-to-crosswalk dist <= crossing_k * box_height.
     waiting_k      : waiting  if dist <= waiting_k * box_height (and not crossing).
-    min_h_frac     : people shorter than this * imageHeight -> no_risk (too far).
+    min_h_frac     : people shorter than this * imageHeight -> low_risk (too far).
     use_hull       : treat the intersection interior (inner-edge zone) as crossing.
     crossing_zone  : optional precomputed zone mask (else computed from the mask).
     Returns a list of dicts: {box, state, dist_px, ratio, box_h, in_zone, foot_point}.
@@ -170,18 +176,18 @@ def classify_people(boxes, crosswalk_mask, crossing_k=0.10, waiting_k=0.50,
         in_zone = bool(crossing_zone[py, px]) if crossing_zone is not None else False
 
         if dist_map is None:
-            state, d, ratio = NO_RISK, None, None
+            state, d, ratio = LOW_RISK, None, None
         elif bh < min_h:
-            state, d, ratio = NO_RISK, float(dist_map[py, px]), None  # too far to assess
+            state, d, ratio = LOW_RISK, float(dist_map[py, px]), None  # too far to assess
         else:
             d = float(dist_map[py, px])
             ratio = d / bh
             if in_zone or ratio <= crossing_k:
-                state = CROSSING
+                state = HIGH_RISK
             elif ratio <= waiting_k:
-                state = WAITING
+                state = MEDIUM_RISK
             else:
-                state = NO_RISK
+                state = LOW_RISK
 
         results.append({
             "box": [x1, y1, x2, y2], "state": state,
@@ -267,7 +273,7 @@ def _save_annotated(img, cw_mask, people, outline, image_path, out_dir):
 
 
 def _counts(people):
-    return {s: sum(p["state"] == s for p in people) for s in (CROSSING, WAITING, NO_RISK)}
+    return {s: sum(p["state"] == s for p in people) for s in (HIGH_RISK, MEDIUM_RISK, LOW_RISK)}
 
 
 def run_image(weights, image_path, out_dir, conf=0.25, imgsz=640,
@@ -312,7 +318,7 @@ def run_folder(weights, images_dir, out_dir, conf=0.25, imgsz=640,
     print(f"processing     : {len(imgs)} images  {images_dir} -> {out_dir}")
 
     per_image, per_person = [], []
-    agg = {CROSSING: 0, WAITING: 0, NO_RISK: 0}
+    agg = {HIGH_RISK: 0, MEDIUM_RISK: 0, LOW_RISK: 0}
     no_cw = 0
     for k, name in enumerate(imgs, 1):
         path = os.path.join(images_dir, name)
@@ -329,7 +335,7 @@ def run_folder(weights, images_dir, out_dir, conf=0.25, imgsz=640,
             agg[s] += c[s]
         has_cw = bool(cw_mask.any())
         no_cw += 0 if has_cw else 1
-        per_image.append([name, len(people), c[CROSSING], c[WAITING], c[NO_RISK], int(has_cw)])
+        per_image.append([name, len(people), c[HIGH_RISK], c[MEDIUM_RISK], c[LOW_RISK], int(has_cw)])
         for i, p in enumerate(people):
             per_person.append([name, i, p["state"], p["ratio"], p["dist_px"], p["box_h"],
                                int(p["in_zone"]), p["foot_point"][0], p["foot_point"][1]])
@@ -339,7 +345,7 @@ def run_folder(weights, images_dir, out_dir, conf=0.25, imgsz=640,
     sum_path = os.path.join(out_dir, "spatial_summary.csv")
     with open(sum_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["image", "persons", "crossing", "waiting", "no_risk", "crosswalk_detected"])
+        w.writerow(["image", "persons", "high_risk", "medium_risk", "low_risk", "crosswalk_detected"])
         w.writerows(per_image)
     det_path = os.path.join(out_dir, "spatial_predictions.csv")
     with open(det_path, "w", newline="", encoding="utf-8") as f:
@@ -368,13 +374,13 @@ def selftest():
     m = np.zeros((H, W), np.uint8)
     m[250:350, 200:400] = 1
     boxesA = [
-        [280, 200, 320, 350],   # feet on the crosswalk, big box      -> crossing
-        [150, 200, 190, 360],   # feet ~30px left, big box            -> waiting
-        [500, 50, 540, 150],    # far from crosswalk, big box         -> no_risk
-        [290, 255, 302, 272],   # feet ON crosswalk but tiny (far)    -> no_risk (size gate)
+        [280, 200, 320, 350],   # feet on the crosswalk, big box      -> high_risk
+        [150, 200, 190, 360],   # feet ~30px left, big box            -> medium_risk
+        [500, 50, 540, 150],    # far from crosswalk, big box         -> low_risk
+        [290, 255, 302, 272],   # feet ON crosswalk but tiny (far)    -> low_risk (size gate)
     ]
     sA = [p["state"] for p in classify_people(boxesA, m)]
-    expA = [CROSSING, WAITING, NO_RISK, NO_RISK]
+    expA = [HIGH_RISK, MEDIUM_RISK, LOW_RISK, LOW_RISK]
     print("scenario A:", sA, "OK" if sA == expA else f"FAIL exp {expA}")
     ok &= sA == expA
 
@@ -383,12 +389,12 @@ def selftest():
     m2[250:350, 100:180] = 1   # left arm
     m2[250:350, 420:500] = 1   # right arm
     boxesB = [
-        [285, 250, 315, 345],   # standing in the GAP (bare asphalt), big -> crossing (in hull)
-        [40, 250, 80, 345],     # left of the left arm, outside hull, near -> waiting
+        [285, 250, 315, 345],   # standing in the GAP (bare asphalt), big -> high_risk (in hull)
+        [40, 250, 80, 345],     # left of the left arm, outside hull, near -> medium_risk
     ]
     pB = classify_people(boxesB, m2)
     sB = [p["state"] for p in pB]
-    expB = [CROSSING, WAITING]
+    expB = [HIGH_RISK, MEDIUM_RISK]
     print("scenario B:", sB, "(in_zone:", [p["in_zone"] for p in pB], ")",
           "OK" if sB == expB else f"FAIL exp {expB}")
     ok &= sB == expB
@@ -411,7 +417,7 @@ def main():
     ap.add_argument("--waiting-k", type=float, default=0.50,
                     help="waiting if dist <= waiting_k * box_height (and not crossing)")
     ap.add_argument("--min-h-frac", type=float, default=0.05,
-                    help="people shorter than this * imageHeight -> no_risk (too far)")
+                    help="people shorter than this * imageHeight -> low_risk (too far)")
     ap.add_argument("--no-hull", action="store_true",
                     help="disable the intersection-interior (inner-edge) crossing zone")
     ap.add_argument("--min-arms", type=int, default=2,
